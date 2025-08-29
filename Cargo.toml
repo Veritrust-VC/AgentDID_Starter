@@ -1,0 +1,37 @@
+[package]
+name = "agentdid-starter"
+version = "0.2.0"
+edition = "2021"
+
+[dependencies]
+# crypto & encoding
+p256 = { version = "0.13", features = ["pkcs8"] }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+
+# password hashing + AEAD for keystore
+argon2 = "0.5"
+aes-gcm = { version = "0.10", features = ["aes256"] }  # AES-256-GCM
+hkdf = "0.12"
+sha2 = "0.10"
+
+# CLI & GUI
+clap = { version = "4", features = ["derive"] }
+eframe = "0.29"   # egui native app
+egui = "0.29"
+
+# time / fs
+time = { version = "0.3", features = ["macros"] }
+dirs = "5"
+
+# zip for backup bundles
+zip = "0.6"
+
+# OPTIONAL: proper did:key
+ssi = { version = "0.7", default-features = false, features = ["did-key","secp256r1","jwk"] }
+
+# small errors
+anyhow = "1"
+
