@@ -7,6 +7,9 @@ use anyhow::{anyhow, Context};
 use base64::Engine;
 use p256::ecdsa::SigningKey;
 use p256::pkcs8::EncodePrivateKey;
+use ssi::did::Document as SsiDocument;
+use ssi::did_key::DIDKey;
+use ssi::jwk::JWK;
 use time::format_description;
 use url::Url;
 
@@ -304,8 +307,11 @@ fn generate_did_key(pin: &str, exportable: bool) -> anyhow::Result<DidBundle> {
     };
     let public_jwk_json = serde_json::to_string_pretty(&public_jwk)?;
 
-    // 2) DID string (POC fallback)
-    let did = build_did_key_fallback(&public_jwk_json);
+    // 2) DID string (spec-compliant)
+    let jwk: JWK = serde_json::from_str(&public_jwk_json).map_err(anyhow::Error::msg)?;
+    let (did, _ssi_doc): (String, SsiDocument) = DIDKey
+        .generate(&jwk)
+        .map_err(|e| anyhow::anyhow!("failed to generate did:key: {e}"))?;
 
     // DID Document (reference)
     let kid = format!("{did}#keys-1");
@@ -316,7 +322,10 @@ fn generate_did_key(pin: &str, exportable: bool) -> anyhow::Result<DidBundle> {
         public_key_jwk: public_jwk.clone(),
     };
     let doc = DidDoc {
-        context: vec!["https://www.w3.org/ns/did/v1".into()],
+        context: vec![
+            "https://www.w3.org/ns/did/v1".into(),
+            "https://w3id.org/security/suites/jws-2020/v1".into(),
+        ],
         id: did.clone(),
         verification_method: vec![vm],
         authentication: vec![kid.clone()],
@@ -460,19 +469,6 @@ fn validate_doc_with_schema(
         anyhow::bail!("Schema validation failed:\n{msg}");
     }
     Ok(())
-}
-
-/* ---- did:key helpers ---- */
-fn build_did_key_fallback(public_jwk_json: &str) -> String {
-    // Fallback: not spec-perfect; OK for POC if ssi isn't available.
-    let digest = {
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(public_jwk_json.as_bytes());
-        let out = h.finalize();
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(out)
-    };
-    format!("did:key:{}", digest)
 }
 
 /* ---------- Minimal GUI ---------- */
