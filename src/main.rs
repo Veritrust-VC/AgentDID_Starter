@@ -10,7 +10,8 @@ use p256::pkcs8::EncodePrivateKey;
 use time::format_description;
 use url::Url;
 
-const DEFAULT_SCHEMA_URL: &str = "https://veritrust.vc/schemas/veritrust/did/Agent/1.0/agent_did_schema.json";
+const DEFAULT_SCHEMA_URL: &str =
+    "https://veritrust.vc/schemas/veritrust/did/Agent/1.0/agent_did_schema.json";
 
 use aes_gcm::{
     aead::{Aead, KeyInit},
@@ -449,7 +450,7 @@ fn validate_doc_with_schema(
     let compiled = JSONSchema::options()
         .with_draft(Draft::Draft7)
         .compile(schema)
-        .context("compile schema failed")?;
+        .map_err(|e| anyhow::anyhow!("compile schema failed: {e}"))?;
     if let Err(errors) = compiled.validate(doc) {
         let mut msg = String::new();
         for e in errors {
@@ -572,7 +573,9 @@ impl eframe::App for GuiApp {
                 let doc_path = out.join("did-key.json");
                 match fs::read_to_string(&doc_path)
                     .map_err(|e| anyhow!("read {} failed: {e}", doc_path.display()))
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).map_err(anyhow::Error::msg))
+                    .and_then(|s| {
+                        serde_json::from_str::<serde_json::Value>(&s).map_err(anyhow::Error::msg)
+                    })
                     .and_then(|doc| {
                         let schema = fetch_schema(DEFAULT_SCHEMA_URL)?;
                         validate_doc_with_schema(&doc, &schema)
@@ -604,9 +607,11 @@ impl eframe::App for GuiApp {
             if !self.doc_preview.is_empty() {
                 ui.separator();
                 ui.label("DID Document (did-key.json):");
-                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                    ui.code(&self.doc_preview);
-                });
+                egui::ScrollArea::vertical()
+                    .max_height(200.0)
+                    .show(ui, |ui| {
+                        ui.code(&self.doc_preview);
+                    });
                 if ui.button("Copy JSON").clicked() {
                     ui.output_mut(|o| o.copied_text = self.doc_preview.clone());
                     self.status = "DID JSON copied to clipboard".into();
