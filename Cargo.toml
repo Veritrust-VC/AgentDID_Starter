@@ -19,7 +19,7 @@ clap = { version = "4", features = ["derive"] }
 eframe = "0.29"
 egui = "0.29"
 
-time = { version = "0.3", features = ["macros"] }
+time = { version = "0.3", features = ["macros", "formatting"] }
 dirs = "5"
 zip = "0.6"
 anyhow = "1"
