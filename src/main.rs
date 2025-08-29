@@ -3,9 +3,11 @@ use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 
+use base64::Engine;
 use p256::ecdsa::SigningKey;
+use p256::elliptic_curve::sec1::ToEncodedPoint;
 use p256::pkcs8::EncodePrivateKey;
-use p256::PublicKey;
+use time::format_description;
 
 use aes_gcm::{
     aead::{Aead, KeyInit},
@@ -34,9 +36,9 @@ struct Cli {
 enum Commands {
     /// Generate a did:key (P-256) and write artifacts
     Generate {
-        /// Output directory
-        #[arg(long, default_value_t = default_outdir())]
-        out: PathBuf,
+        /// Output directory (defaults to ~/.agentdid)
+        #[arg(long)]
+        out: Option<PathBuf>,
         /// PIN to protect the keystore (prompting recommended in real app)
         #[arg(long)]
         pin: String,
@@ -46,32 +48,32 @@ enum Commands {
     },
     /// Print DID string
     ShowDid {
-        #[arg(long, default_value_t = default_outdir())]
-        out: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// Print reference DID Document JSON
     ShowDoc {
-        #[arg(long, default_value_t = default_outdir())]
-        out: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// Reveal private key (if allowed)
     ShowKey {
-        #[arg(long, default_value_t = default_outdir())]
-        out: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
         #[arg(long)]
         pin: String,
     },
     /// Create encrypted backup bundle
     Backup {
-        #[arg(long, default_value_t = default_outdir())]
-        out: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
         #[arg(long, default_value = "backup.adk")]
         file: String,
     },
     /// Restore from encrypted backup bundle
     Restore {
-        #[arg(long, default_value_t = default_outdir())]
-        out: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
         #[arg(long)]
         file: String,
         #[arg(long)]
@@ -143,25 +145,30 @@ fn run_cli(cmd: Commands) {
             pin,
             allow_export,
         } => {
+            let out = out.unwrap_or_else(default_outdir);
             fs::create_dir_all(&out).ok();
             let bundle = generate_did_key(&pin, allow_export).expect("generate failed");
             write_outputs(&out, &bundle).expect("failed writing outputs");
             println!("✅ DID generated. See {}", out.display());
         }
         Commands::ShowDid { out } => {
+            let out = out.unwrap_or_else(default_outdir);
             let did = fs::read_to_string(out.join("did.txt")).expect("no did.txt");
             println!("{did}");
         }
         Commands::ShowDoc { out } => {
+            let out = out.unwrap_or_else(default_outdir);
             let doc = fs::read_to_string(out.join("did-key.json")).expect("no did-key.json");
             println!("{doc}");
         }
         Commands::ShowKey { out, pin } => {
+            let out = out.unwrap_or_else(default_outdir);
             let priv_pem = decrypt_private_key(&out, &pin)
                 .expect("cannot decrypt (wrong PIN?) or not exportable");
             println!("{priv_pem}");
         }
         Commands::Backup { out, file } => {
+            let out = out.unwrap_or_else(default_outdir);
             let ks = out.join("keystore.enc");
             let meta = out.join("metadata.json");
             let did = out.join("did.txt");
@@ -189,6 +196,7 @@ fn run_cli(cmd: Commands) {
             println!("✅ Backup created at {}", bundle.display());
         }
         Commands::Restore { out, file, pin: _ } => {
+            let out = out.unwrap_or_else(default_outdir);
             fs::create_dir_all(&out).ok();
             let mut zip =
                 zip::ZipArchive::new(fs::File::open(&file).expect("open backup")).expect("zip");
@@ -222,7 +230,7 @@ struct DidBundle {
 fn generate_did_key(pin: &str, exportable: bool) -> anyhow::Result<DidBundle> {
     // 1) keypair (P-256)
     let signing_key = SigningKey::random(&mut OsRng);
-    let verify_key = PublicKey::from(&signing_key);
+    let verify_key = signing_key.verifying_key();
 
     // Public JWK
     let pub_affine = verify_key.to_encoded_point(false);
@@ -267,11 +275,16 @@ fn generate_did_key(pin: &str, exportable: bool) -> anyhow::Result<DidBundle> {
     // 4) Derive KEK from PIN using Argon2id; store PHC string (with salt/params)
     let salt = SaltString::generate(&mut OsRng);
     let argon = Argon2::default();
-    let phc = argon.hash_password(pin.as_bytes(), &salt)?.to_string();
+    let phc = argon
+        .hash_password(pin.as_bytes(), &salt)
+        .map_err(anyhow::Error::msg)?
+        .to_string();
 
     // Re-derive raw bytes from PHC for HKDF
-    let parsed = PasswordHash::new(&phc)?;
-    Argon2::default().verify_password(pin.as_bytes(), &parsed)?; // check correctness now
+    let parsed = PasswordHash::new(&phc).map_err(anyhow::Error::msg)?;
+    Argon2::default()
+        .verify_password(pin.as_bytes(), &parsed)
+        .map_err(anyhow::Error::msg)?; // check correctness now
     let hk = Hkdf::<Sha256>::new(
         None,
         parsed
@@ -280,22 +293,24 @@ fn generate_did_key(pin: &str, exportable: bool) -> anyhow::Result<DidBundle> {
             .as_bytes(),
     );
     let mut kek = [0u8; 32];
-    hk.expand(b"agentdid-keystore", &mut kek)?;
+    hk.expand(b"agentdid-keystore", &mut kek)
+        .map_err(anyhow::Error::msg)?;
 
     // AES-256-GCM encrypt
     let cipher = Aes256Gcm::new_from_slice(&kek)?;
     let nonce_bytes: [u8; 12] = rand::random();
     let nonce = Nonce::from_slice(&nonce_bytes);
-    let ciphertext = cipher.encrypt(nonce, private_pem.as_bytes())?;
+    let ciphertext = cipher
+        .encrypt(nonce, private_pem.as_bytes())
+        .map_err(anyhow::Error::msg)?;
 
+    let rfc3339 = format_description::well_known::Rfc3339;
     let meta = KeystoreMeta {
         alg: "ES256".into(),
         curve: "P-256".into(),
         kid: "#keys-1".into(),
         exportable,
-        created_at: time::OffsetDateTime::now_utc()
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap(),
+        created_at: time::OffsetDateTime::now_utc().format(&rfc3339).unwrap(),
         argon2_phc: phc,
         nonce_b64: base64::engine::general_purpose::STANDARD.encode(nonce_bytes),
     };
@@ -332,7 +347,7 @@ fn decrypt_private_key(out: &PathBuf, pin: &str) -> anyhow::Result<String> {
         anyhow::bail!("keystore.enc is empty/missing");
     }
     // Re-derive KEK from stored Argon2 PHC + provided PIN
-    let parsed = PasswordHash::new(&meta.argon2_phc)?;
+    let parsed = PasswordHash::new(&meta.argon2_phc).map_err(anyhow::Error::msg)?;
     Argon2::default()
         .verify_password(pin.as_bytes(), &parsed)
         .map_err(|_| anyhow::anyhow!("invalid PIN"))?;
@@ -344,13 +359,17 @@ fn decrypt_private_key(out: &PathBuf, pin: &str) -> anyhow::Result<String> {
             .as_bytes(),
     );
     let mut kek = [0u8; 32];
-    hk.expand(b"agentdid-keystore", &mut kek)?;
+    hk.expand(b"agentdid-keystore", &mut kek)
+        .map_err(anyhow::Error::msg)?;
 
-    let nonce_bytes =
-        base64::engine::general_purpose::STANDARD.decode(meta.nonce_b64.as_bytes())?;
+    let nonce_bytes = base64::engine::general_purpose::STANDARD
+        .decode(meta.nonce_b64.as_bytes())
+        .map_err(anyhow::Error::msg)?;
     let cipher = Aes256Gcm::new_from_slice(&kek)?;
     let nonce = Nonce::from_slice(&nonce_bytes);
-    let plaintext = cipher.decrypt(nonce, ct.as_ref())?;
+    let plaintext = cipher
+        .decrypt(nonce, ct.as_ref())
+        .map_err(anyhow::Error::msg)?;
     let pem = String::from_utf8(plaintext)?;
     Ok(pem)
 }
@@ -374,7 +393,7 @@ fn run_gui() -> eframe::Result<()> {
     eframe::run_native(
         "AgentDID Starter",
         native_options,
-        Box::new(|_cc| Box::new(GuiApp::default())),
+        Box::new(|_cc| Ok(Box::new(GuiApp::default()))),
     )
 }
 
@@ -399,7 +418,11 @@ impl eframe::App for GuiApp {
 
             ui.label("Output folder:");
             ui.add(egui::TextEdit::singleline(&mut self.out_dir));
-            let out = PathBuf::from(self.out_dir.clone());
+            let out = if self.out_dir.trim().is_empty() {
+                default_outdir()
+            } else {
+                PathBuf::from(self.out_dir.trim())
+            };
 
             ui.separator();
             ui.label("Enter PIN to protect your keystore:");
