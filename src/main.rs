@@ -7,9 +7,7 @@ use anyhow::{anyhow, Context};
 use base64::Engine;
 use p256::ecdsa::SigningKey;
 use p256::pkcs8::EncodePrivateKey;
-use ssi::did::Document as SsiDocument;
-use ssi::did_key::DIDKey;
-use ssi::jwk::JWK;
+use bs58; // base58btc encoder
 use time::format_description;
 use url::Url;
 
@@ -307,11 +305,12 @@ fn generate_did_key(pin: &str, exportable: bool) -> anyhow::Result<DidBundle> {
     };
     let public_jwk_json = serde_json::to_string_pretty(&public_jwk)?;
 
-    // 2) DID string (spec-compliant)
-    let jwk: JWK = serde_json::from_str(&public_jwk_json).map_err(anyhow::Error::msg)?;
-    let (did, _ssi_doc): (String, SsiDocument) = DIDKey
-        .generate(&jwk)
-        .map_err(|e| anyhow::anyhow!("failed to generate did:key: {e}"))?;
+    // From P-256 signing key -> verifying key -> compressed SEC1 (33 bytes)
+    let ep_compressed = verify_key.to_encoded_point(true); // true = compressed
+    let comp = ep_compressed.as_bytes(); // 33 bytes: 0x02/0x03 + 32-byte X
+
+    // Build spec-correct did:key using multicodec + base58btc
+    let did = did_key_from_sec1_compressed("P-256", comp)?;
 
     // DID Document (reference)
     let kid = format!("{did}#keys-1");
@@ -438,6 +437,49 @@ fn decrypt_private_key(out: &PathBuf, pin: &str) -> anyhow::Result<String> {
         .map_err(anyhow::Error::msg)?;
     let pem = String::from_utf8(plaintext)?;
     Ok(pem)
+}
+
+/// Multicodec unsigned-varint (LEB128) encoder for small codes like 0x1200, 0xE7.
+fn uvarint(mut n: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        let mut b = (n & 0x7F) as u8;
+        n >>= 7;
+        if n != 0 {
+            b |= 0x80;
+            out.push(b);
+        } else {
+            out.push(b);
+            break;
+        }
+    }
+    out
+}
+
+/// Build a spec-correct did:key for a P-256 or secp256k1 public key.
+/// - For P-256 we use multicodec `p256-pub` (0x1200) and **compressed** SEC1 (33 bytes).
+/// - For secp256k1 we use multicodec `secp256k1-pub` (0xE7) and compressed SEC1 (33 bytes).
+/// Returns a `did:key:z...` base58btc string.
+///
+/// References:
+/// - did:key method: multibase(base58btc( multicodec(key-type) || key-bytes )), prefix with "did:key:".
+///   https://w3c-ccg.github.io/did-key-spec/
+/// - multicodec table codes:
+///   p256-pub = 0x1200, secp256k1-pub = 0xE7
+///   https://github.com/multiformats/multicodec/blob/master/table.csv
+fn did_key_from_sec1_compressed(curve: &str, compressed_sec1: &[u8]) -> anyhow::Result<String> {
+    // Select multicodec code
+    let code: u64 = match curve {
+        "P-256" | "P256" | "p-256" => 0x1200,      // p256-pub (compressed)
+        "secp256k1" | "K-256" | "k256" => 0xE7,    // secp256k1-pub (compressed)
+        _ => return Err(anyhow!("unsupported curve for did:key: {}", curve)),
+    };
+    // varint(code) || key-bytes
+    let mut bytes = uvarint(code);
+    bytes.extend_from_slice(compressed_sec1);
+    // multibase: base58btc with 'z' prefix
+    let mb = format!("z{}", bs58::encode(&bytes).into_string());
+    Ok(format!("did:key:{}", mb))
 }
 
 fn fetch_schema(schema_url: &str) -> anyhow::Result<serde_json::Value> {
