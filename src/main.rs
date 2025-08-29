@@ -7,13 +7,23 @@ use p256::ecdsa::SigningKey;
 use p256::pkcs8::EncodePrivateKey;
 use p256::PublicKey;
 
-use aes_gcm::{aead::{Aead, KeyInit}, Aes256Gcm, Nonce};
-use argon2::{password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString}, Argon2};
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Nonce,
+};
+use argon2::{
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
 use hkdf::Hkdf;
 use sha2::Sha256;
 
 #[derive(Debug, Parser)]
-#[command(name="AgentDID Starter", version, about="POC/MVP did:key generator with PIN-encrypted keystore")]
+#[command(
+    name = "AgentDID Starter",
+    version,
+    about = "POC/MVP did:key generator with PIN-encrypted keystore"
+)]
 struct Cli {
     /// Run GUI (no args) or CLI subcommands
     #[command(subcommand)]
@@ -70,7 +80,9 @@ enum Commands {
 }
 
 fn default_outdir() -> PathBuf {
-    dirs::home_dir().unwrap_or_else(|| ".".into()).join(".agentdid")
+    dirs::home_dir()
+        .unwrap_or_else(|| ".".into())
+        .join(".agentdid")
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -126,7 +138,11 @@ fn main() -> eframe::Result<()> {
 
 fn run_cli(cmd: Commands) {
     match cmd {
-        Commands::Generate { out, pin, allow_export } => {
+        Commands::Generate {
+            out,
+            pin,
+            allow_export,
+        } => {
             fs::create_dir_all(&out).ok();
             let bundle = generate_did_key(&pin, allow_export).expect("generate failed");
             write_outputs(&out, &bundle).expect("failed writing outputs");
@@ -141,7 +157,8 @@ fn run_cli(cmd: Commands) {
             println!("{doc}");
         }
         Commands::ShowKey { out, pin } => {
-            let priv_pem = decrypt_private_key(&out, &pin).expect("cannot decrypt (wrong PIN?) or not exportable");
+            let priv_pem = decrypt_private_key(&out, &pin)
+                .expect("cannot decrypt (wrong PIN?) or not exportable");
             println!("{priv_pem}");
         }
         Commands::Backup { out, file } => {
@@ -153,14 +170,15 @@ fn run_cli(cmd: Commands) {
             let bundle = out.join(file);
 
             let mut zip = zip::ZipWriter::new(fs::File::create(&bundle).unwrap());
-            let opts = zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            let opts = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
 
             for (name, p) in [
-                ("keystore.enc",&ks),
-                ("metadata.json",&meta),
-                ("did.txt",&did),
-                ("did-key.json",&doc),
-                ("public.jwk",&jwk)
+                ("keystore.enc", &ks),
+                ("metadata.json", &meta),
+                ("did.txt", &did),
+                ("did-key.json", &doc),
+                ("public.jwk", &jwk),
             ] {
                 zip.start_file(name, opts).unwrap();
                 let bytes = fs::read(p).unwrap_or_default();
@@ -172,11 +190,15 @@ fn run_cli(cmd: Commands) {
         }
         Commands::Restore { out, file, pin: _ } => {
             fs::create_dir_all(&out).ok();
-            let mut zip = zip::ZipArchive::new(fs::File::open(&file).expect("open backup")).expect("zip");
+            let mut zip =
+                zip::ZipArchive::new(fs::File::open(&file).expect("open backup")).expect("zip");
             for i in 0..zip.len() {
                 let mut f = zip.by_index(i).unwrap();
                 let out_path = out.join(f.name());
-                if f.name().ends_with('/') { fs::create_dir_all(&out_path).ok(); continue; }
+                if f.name().ends_with('/') {
+                    fs::create_dir_all(&out_path).ok();
+                    continue;
+                }
                 let mut buf = Vec::new();
                 use std::io::Read;
                 f.read_to_end(&mut buf).unwrap();
@@ -204,17 +226,21 @@ fn generate_did_key(pin: &str, exportable: bool) -> anyhow::Result<DidBundle> {
 
     // Public JWK
     let pub_affine = verify_key.to_encoded_point(false);
-    let xy = pub_affine.coordinates().ok_or_else(|| anyhow::anyhow!("bad point"))?;
+    let xy = pub_affine
+        .coordinates()
+        .ok_or_else(|| anyhow::anyhow!("bad point"))?;
     let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(xy.x().unwrap());
     let y = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(xy.y().unwrap());
-    let public_jwk = Jwk { kty: "EC".into(), crv: "P-256".into(), x, y };
+    let public_jwk = Jwk {
+        kty: "EC".into(),
+        crv: "P-256".into(),
+        x,
+        y,
+    };
     let public_jwk_json = serde_json::to_string_pretty(&public_jwk)?;
 
-    // 2) DID string (ssi preferred)
-    let did = match build_did_key_with_ssi(&public_jwk_json) {
-        Some(d) => d,
-        None => build_did_key_fallback(&public_jwk_json),
-    };
+    // 2) DID string (POC fallback)
+    let did = build_did_key_fallback(&public_jwk_json);
 
     // DID Document (reference)
     let kid = format!("{did}#keys-1");
@@ -234,7 +260,9 @@ fn generate_did_key(pin: &str, exportable: bool) -> anyhow::Result<DidBundle> {
     let doc_json = serde_json::to_string_pretty(&doc)?;
 
     // 3) Private key PEM
-    let private_pem = signing_key.to_pkcs8_pem(p256::pkcs8::LineEnding::LF)?.to_string();
+    let private_pem = signing_key
+        .to_pkcs8_pem(p256::pkcs8::LineEnding::LF)?
+        .to_string();
 
     // 4) Derive KEK from PIN using Argon2id; store PHC string (with salt/params)
     let salt = SaltString::generate(&mut OsRng);
@@ -244,7 +272,13 @@ fn generate_did_key(pin: &str, exportable: bool) -> anyhow::Result<DidBundle> {
     // Re-derive raw bytes from PHC for HKDF
     let parsed = PasswordHash::new(&phc)?;
     Argon2::default().verify_password(pin.as_bytes(), &parsed)?; // check correctness now
-    let hk = Hkdf::<Sha256>::new(None, parsed.hash.ok_or_else(|| anyhow::anyhow!("no hash"))?.as_bytes());
+    let hk = Hkdf::<Sha256>::new(
+        None,
+        parsed
+            .hash
+            .ok_or_else(|| anyhow::anyhow!("no hash"))?
+            .as_bytes(),
+    );
     let mut kek = [0u8; 32];
     hk.expand(b"agentdid-keystore", &mut kek)?;
 
@@ -259,7 +293,9 @@ fn generate_did_key(pin: &str, exportable: bool) -> anyhow::Result<DidBundle> {
         curve: "P-256".into(),
         kid: "#keys-1".into(),
         exportable,
-        created_at: time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap(),
+        created_at: time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap(),
         argon2_phc: phc,
         nonce_b64: base64::engine::general_purpose::STANDARD.encode(nonce_bytes),
     };
@@ -278,7 +314,10 @@ fn write_outputs(out: &PathBuf, b: &DidBundle) -> anyhow::Result<()> {
     fs::write(out.join("did.txt"), &b.did)?;
     fs::write(out.join("did-key.json"), &b.doc_json)?;
     fs::write(out.join("public.jwk"), &b.public_jwk_json)?;
-    fs::write(out.join("metadata.json"), serde_json::to_vec_pretty(&b.meta)?)?;
+    fs::write(
+        out.join("metadata.json"),
+        serde_json::to_vec_pretty(&b.meta)?,
+    )?;
     fs::write(out.join("keystore.enc"), &b.ciphertext)?;
     Ok(())
 }
@@ -294,14 +333,21 @@ fn decrypt_private_key(out: &PathBuf, pin: &str) -> anyhow::Result<String> {
     }
     // Re-derive KEK from stored Argon2 PHC + provided PIN
     let parsed = PasswordHash::new(&meta.argon2_phc)?;
-    Argon2::default().verify_password(pin.as_bytes(), &parsed)
+    Argon2::default()
+        .verify_password(pin.as_bytes(), &parsed)
         .map_err(|_| anyhow::anyhow!("invalid PIN"))?;
-    let hk = Hkdf::<Sha256>::new(None, parsed.hash.ok_or_else(|| anyhow::anyhow!("no hash"))?.as_bytes());
+    let hk = Hkdf::<Sha256>::new(
+        None,
+        parsed
+            .hash
+            .ok_or_else(|| anyhow::anyhow!("no hash"))?
+            .as_bytes(),
+    );
     let mut kek = [0u8; 32];
     hk.expand(b"agentdid-keystore", &mut kek)?;
 
-    let nonce_bytes = base64::engine::general_purpose::STANDARD
-        .decode(meta.nonce_b64.as_bytes())?;
+    let nonce_bytes =
+        base64::engine::general_purpose::STANDARD.decode(meta.nonce_b64.as_bytes())?;
     let cipher = Aes256Gcm::new_from_slice(&kek)?;
     let nonce = Nonce::from_slice(&nonce_bytes);
     let plaintext = cipher.decrypt(nonce, ct.as_ref())?;
@@ -310,19 +356,6 @@ fn decrypt_private_key(out: &PathBuf, pin: &str) -> anyhow::Result<String> {
 }
 
 /* ---- did:key helpers ---- */
-fn build_did_key_with_ssi(public_jwk_json: &str) -> Option<String> {
-    #[allow(unused)]
-    {
-        use ssi::jwk::JWK;
-        use ssi::did::Document;
-        use ssi::did_key::DIDKey;
-        let jwk: JWK = serde_json::from_str(public_jwk_json).ok()?;
-        let method = DIDKey;
-        let (did, _doc): (String, Document) = method.generate(&jwk).ok()?;
-        Some(did)
-    }
-}
-
 fn build_did_key_fallback(public_jwk_json: &str) -> String {
     // Fallback: not spec-perfect; OK for POC if ssi isn't available.
     let digest = {
@@ -372,7 +405,10 @@ impl eframe::App for GuiApp {
             ui.label("Enter PIN to protect your keystore:");
             ui.add(egui::TextEdit::singleline(&mut self.pin).password(true));
 
-            ui.checkbox(&mut self.allow_export, "Allow private key export (optional)");
+            ui.checkbox(
+                &mut self.allow_export,
+                "Allow private key export (optional)",
+            );
 
             if ui.button("Generate did:key (P-256)").clicked() {
                 fs::create_dir_all(&out).ok();
@@ -394,10 +430,16 @@ impl eframe::App for GuiApp {
                 ui.label("Your DID:");
                 ui.code(&self.did);
 
-                if ui.button("Reveal private key (requires export allowed + PIN)").clicked() {
+                if ui
+                    .button("Reveal private key (requires export allowed + PIN)")
+                    .clicked()
+                {
                     match decrypt_private_key(&out, &self.pin) {
-                        Ok(pem) => { self.status = "Private key (PEM) copied to clipboard.".into(); ui.output_mut(|o| o.copied_text = pem); }
-                        Err(e) =>  self.status = format!("Cannot reveal key: {e}"),
+                        Ok(pem) => {
+                            self.status = "Private key (PEM) copied to clipboard.".into();
+                            ui.output_mut(|o| o.copied_text = pem);
+                        }
+                        Err(e) => self.status = format!("Cannot reveal key: {e}"),
                     }
                 }
             }
@@ -407,4 +449,3 @@ impl eframe::App for GuiApp {
         });
     }
 }
-
