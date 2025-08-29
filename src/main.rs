@@ -3,11 +3,14 @@ use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use base64::Engine;
 use p256::ecdsa::SigningKey;
 use p256::pkcs8::EncodePrivateKey;
 use time::format_description;
+use url::Url;
+
+const DEFAULT_SCHEMA_URL: &str = "https://veritrust.vc/schemas/veritrust/did/Agent/1.0/agent_did_schema.json";
 
 use aes_gcm::{
     aead::{Aead, KeyInit},
@@ -24,7 +27,7 @@ use sha2::Sha256;
 #[command(
     name = "AgentDID Starter",
     version,
-    about = "POC/MVP did:key generator with PIN-encrypted keystore"
+    about = "did:key generator with PIN-encrypted keystore"
 )]
 struct Cli {
     /// Run GUI (no args) or CLI subcommands
@@ -79,12 +82,48 @@ enum Commands {
         #[arg(long)]
         pin: String,
     },
+    /// Validate did-key.json against the Veritrust schema
+    Validate {
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Optional custom schema URL
+        #[arg(long, default_value = DEFAULT_SCHEMA_URL)]
+        schema: String,
+    },
 }
 
 fn default_outdir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| ".".into())
         .join(".agentdid")
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct AppConfig {
+    last_out_dir: Option<String>,
+}
+
+fn config_dir() -> PathBuf {
+    let base = dirs::config_dir().unwrap_or_else(|| default_outdir());
+    base.join("veritrust").join("agentdid")
+}
+
+fn config_path() -> PathBuf {
+    config_dir().join("config.json")
+}
+
+fn load_config() -> AppConfig {
+    let p = config_path();
+    match fs::read(&p) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Err(_) => Default::default(),
+    }
+}
+
+fn save_config(cfg: &AppConfig) -> anyhow::Result<()> {
+    fs::create_dir_all(config_dir()).ok();
+    fs::write(config_path(), serde_json::to_vec_pretty(cfg)?)?;
+    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -217,6 +256,22 @@ fn run_cli(cmd: Commands) {
                 fs::write(out_path, buf).unwrap();
             }
             println!("✅ Backup restored to {}", out.display());
+        }
+        Commands::Validate { out, schema } => {
+            let out = out.unwrap_or_else(default_outdir);
+            let doc_path = out.join("did-key.json");
+            let res = fs::read_to_string(&doc_path)
+                .with_context(|| format!("missing {}", doc_path.display()))
+                .and_then(|doc_str| {
+                    let doc_json: serde_json::Value =
+                        serde_json::from_str(&doc_str).context("did-key.json parse error")?;
+                    let schema_json = fetch_schema(&schema)?;
+                    validate_doc_with_schema(&doc_json, &schema_json)
+                });
+            match res {
+                Ok(()) => println!("✅ did-key.json is valid against the schema."),
+                Err(e) => println!("❌ Validation failed: {e}"),
+            }
         }
     }
 }
@@ -375,6 +430,37 @@ fn decrypt_private_key(out: &PathBuf, pin: &str) -> anyhow::Result<String> {
     Ok(pem)
 }
 
+fn fetch_schema(schema_url: &str) -> anyhow::Result<serde_json::Value> {
+    let url = Url::parse(schema_url).context("bad schema URL")?;
+    let resp = reqwest::blocking::get(url).context("schema GET failed")?;
+    let status = resp.status();
+    anyhow::ensure!(status.is_success(), "schema fetch status {}", status);
+    let v = resp
+        .json::<serde_json::Value>()
+        .context("invalid schema JSON")?;
+    Ok(v)
+}
+
+fn validate_doc_with_schema(
+    doc: &serde_json::Value,
+    schema: &serde_json::Value,
+) -> anyhow::Result<()> {
+    use jsonschema::{Draft, JSONSchema};
+    let compiled = JSONSchema::options()
+        .with_draft(Draft::Draft7)
+        .compile(schema)
+        .context("compile schema failed")?;
+    if let Err(errors) = compiled.validate(doc) {
+        let mut msg = String::new();
+        for e in errors {
+            use std::fmt::Write as _;
+            let _ = writeln!(&mut msg, "- {e}");
+        }
+        anyhow::bail!("Schema validation failed:\n{msg}");
+    }
+    Ok(())
+}
+
 /* ---- did:key helpers ---- */
 fn build_did_key_fallback(public_jwk_json: &str) -> String {
     // Fallback: not spec-perfect; OK for POC if ssi isn't available.
@@ -398,24 +484,46 @@ fn run_gui() -> eframe::Result<()> {
     )
 }
 
-#[derive(Default)]
 struct GuiApp {
     pin: String,
     allow_export: bool,
     status: String,
     did: String,
     out_dir: String,
+    doc_preview: String,
+}
+
+impl Default for GuiApp {
+    fn default() -> Self {
+        let mut app = GuiApp {
+            pin: String::new(),
+            allow_export: false,
+            status: String::new(),
+            did: String::new(),
+            out_dir: String::new(),
+            doc_preview: String::new(),
+        };
+        let cfg = load_config();
+        if let Some(path) = cfg.last_out_dir {
+            if PathBuf::from(&path).join("did.txt").exists() {
+                app.out_dir = path;
+            }
+        }
+        if app.out_dir.is_empty() {
+            let def = default_outdir();
+            if def.join("did.txt").exists() {
+                app.out_dir = def.to_string_lossy().to_string();
+            }
+        }
+        app
+    }
 }
 
 impl eframe::App for GuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("AgentDID Starter (POC/MVP)");
+            ui.heading("AgentDID Starter");
             ui.separator();
-
-            if self.out_dir.is_empty() {
-                self.out_dir = default_outdir().to_string_lossy().to_string();
-            }
 
             ui.label("Output folder:");
             ui.add(egui::TextEdit::singleline(&mut self.out_dir));
@@ -443,9 +551,34 @@ impl eframe::App for GuiApp {
                         } else {
                             self.did = b.did.clone();
                             self.status = format!("DID generated. Files in {}", out.display());
+                            if let Ok(s) = fs::read_to_string(out.join("did-key.json")) {
+                                self.doc_preview = s;
+                            }
+                            let _ = save_config(&AppConfig {
+                                last_out_dir: Some(out.to_string_lossy().to_string()),
+                            });
                         }
                     }
                     Err(e) => self.status = format!("Error: {e}"),
+                }
+            }
+
+            if ui.button("Validate against Veritrust schema").clicked() {
+                let out = if self.out_dir.trim().is_empty() {
+                    default_outdir()
+                } else {
+                    PathBuf::from(self.out_dir.trim())
+                };
+                let doc_path = out.join("did-key.json");
+                match fs::read_to_string(&doc_path)
+                    .map_err(|e| anyhow!("read {} failed: {e}", doc_path.display()))
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).map_err(anyhow::Error::msg))
+                    .and_then(|doc| {
+                        let schema = fetch_schema(DEFAULT_SCHEMA_URL)?;
+                        validate_doc_with_schema(&doc, &schema)
+                    }) {
+                    Ok(()) => self.status = "✅ Valid per Veritrust schema".into(),
+                    Err(e) => self.status = format!("❌ Invalid: {e}"),
                 }
             }
 
@@ -468,8 +601,26 @@ impl eframe::App for GuiApp {
                 }
             }
 
+            if !self.doc_preview.is_empty() {
+                ui.separator();
+                ui.label("DID Document (did-key.json):");
+                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                    ui.code(&self.doc_preview);
+                });
+                if ui.button("Copy JSON").clicked() {
+                    ui.output_mut(|o| o.copied_text = self.doc_preview.clone());
+                    self.status = "DID JSON copied to clipboard".into();
+                }
+            }
+
             ui.separator();
             ui.label(&self.status);
+
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                ui.label("© Veritrust • ");
+                ui.hyperlink_to("https://veritrust.vc", "https://veritrust.vc");
+            });
         });
     }
 }
