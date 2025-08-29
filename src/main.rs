@@ -3,6 +3,7 @@ use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 
+use anyhow::anyhow;
 use base64::Engine;
 use p256::ecdsa::SigningKey;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
@@ -231,14 +232,11 @@ fn generate_did_key(pin: &str, exportable: bool) -> anyhow::Result<DidBundle> {
     // 1) keypair (P-256)
     let signing_key = SigningKey::random(&mut OsRng);
     let verify_key = signing_key.verifying_key();
-
-    // Public JWK
-    let pub_affine = verify_key.to_encoded_point(false);
-    let xy = pub_affine
-        .coordinates()
-        .ok_or_else(|| anyhow::anyhow!("bad point"))?;
-    let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(xy.x().unwrap());
-    let y = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(xy.y().unwrap());
+    let ep = verify_key.to_encoded_point(false); // uncompressed SEC1 point
+    let x_bytes = ep.x().ok_or_else(|| anyhow!("missing X"))?;
+    let y_bytes = ep.y().ok_or_else(|| anyhow!("missing Y"))?;
+    let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(x_bytes);
+    let y = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(y_bytes);
     let public_jwk = Jwk {
         kty: "EC".into(),
         crv: "P-256".into(),
