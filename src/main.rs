@@ -6,7 +6,6 @@ use std::{fs, path::PathBuf};
 use anyhow::anyhow;
 use base64::Engine;
 use p256::ecdsa::SigningKey;
-use p256::elliptic_curve::sec1::ToEncodedPoint;
 use p256::pkcs8::EncodePrivateKey;
 use time::format_description;
 
@@ -114,17 +113,21 @@ struct DidDoc {
     #[serde(rename = "@context")]
     context: Vec<String>,
     id: String,
-    verificationMethod: Vec<VerificationMethod>,
+    #[serde(rename = "verificationMethod")]
+    verification_method: Vec<VerificationMethod>,
     authentication: Vec<String>,
-    assertionMethod: Vec<String>,
+    #[serde(rename = "assertionMethod")]
+    assertion_method: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct VerificationMethod {
     id: String,
+    #[serde(rename = "type")]
     r#type: String,
     controller: String,
-    publicKeyJwk: Jwk,
+    #[serde(rename = "publicKeyJwk")]
+    public_key_jwk: Jwk,
 }
 
 fn main() -> eframe::Result<()> {
@@ -254,14 +257,14 @@ fn generate_did_key(pin: &str, exportable: bool) -> anyhow::Result<DidBundle> {
         id: kid.clone(),
         r#type: "JsonWebKey2020".into(),
         controller: did.clone(),
-        publicKeyJwk: public_jwk.clone(),
+        public_key_jwk: public_jwk.clone(),
     };
     let doc = DidDoc {
         context: vec!["https://www.w3.org/ns/did/v1".into()],
         id: did.clone(),
-        verificationMethod: vec![vm],
+        verification_method: vec![vm],
         authentication: vec![kid.clone()],
-        assertionMethod: vec![kid.clone()],
+        assertion_method: vec![kid.clone()],
     };
     let doc_json = serde_json::to_string_pretty(&doc)?;
 
