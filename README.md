@@ -16,6 +16,12 @@
 
 > ⚠️ Note: If your DID **does not start with `did:key:z…`**, schema validation may fail. Ensure you use a **spec-correct** `did:key` encoder for your chosen curve (P-256 or secp256k1).
 
+### Windows GUI
+
+Below is the Windows interface, showing fields for choosing the output folder, entering the PIN, and buttons to generate and validate the DID.
+
+![Windows GUI](img/ScreenshotDID.jpg)
+
 ---
 
 ## Quick Start (GUI)
